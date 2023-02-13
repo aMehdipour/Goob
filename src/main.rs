@@ -1,4 +1,5 @@
 #![allow(non_snake_case)]
+#![windows_subsystem = "windows"]
 mod matlab_script;
 
 use eframe::{egui::Vec2, run_native, NativeOptions};
