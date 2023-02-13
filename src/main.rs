@@ -1,113 +1,107 @@
-use std::borrow::Cow;
+#![allow(non_snake_case)]
+mod matlab_script;
 
-use eframe::{
-    egui::{
-        self, CentralPanel, Color32, CtxRef, FontDefinitions, FontFamily, Hyperlink, Label, Layout,
-        ScrollArea, Separator, Ui, Vec2,
-    },
-    epi::App,
-    run_native, NativeOptions,
-};
+use eframe::{egui::Vec2, run_native, NativeOptions};
+use futures::executor::block_on;
+use matlab_script::MatlabScript;
+use reqwest::Client;
+use serde::Deserialize;
+use std::ascii::AsciiExt;
+use tokio::runtime::Runtime;
 
-const PADDING: f32 = 5.0;
-const WHITE: Color32 = Color32::from_rgb(255, 255, 255);
-const CYAN: Color32 = Color32::from_rgb(0, 255, 255);
-
-struct MatlabScript {
-    choons: Vec<ChoonsList>,
+#[derive(Deserialize, Debug)]
+struct PlaylistItem {
+    id: String,
+    snippet: Snippet,
 }
 
-struct ChoonsList {
+#[derive(Deserialize, Debug)]
+struct Snippet {
     title: String,
-    url: String,
+    description: String,
+    resourceId: ResourceId,
 }
 
-impl MatlabScript {
-    fn new() -> Self {
-        let iter = (0..20).map(|a: i32| ChoonsList {
-            title: format!("Choons List {}", a),
-            url: format!("https://choons.io/{}", a),
-        });
-        MatlabScript {
-            choons: Vec::from_iter(iter),
-        }
-    }
-
-    fn configure_fonts(&self, ctx: &CtxRef) {
-        let mut font_def = FontDefinitions::default();
-
-        font_def.font_data.insert(
-            "FiraCode".to_string(),
-            Cow::Borrowed(include_bytes!(
-                "../Fira Code Regular Nerd Font Complete.ttf"
-            )),
-        );
-
-        font_def.family_and_size.insert(
-            eframe::egui::TextStyle::Heading,
-            (FontFamily::Proportional, 35.),
-        );
-
-        font_def.family_and_size.insert(
-            eframe::egui::TextStyle::Body,
-            (FontFamily::Proportional, 20.),
-        );
-
-        font_def
-            .fonts_for_family
-            .get_mut(&FontFamily::Proportional)
-            .unwrap()
-            .insert(0, "FiraCode".to_string());
-
-        ctx.set_fonts(font_def);
-    }
-
-    fn render_choons(&self, ui: &mut eframe::egui::Ui) {
-        for a in &self.choons {
-            // let label = Label::new(&a.url).text_style(eframe::egui::TextStyle::Button);
-            let title = format!("▶ {}", a.title);
-
-            ui.add_space(PADDING);
-            ui.colored_label(WHITE, title);
-            ui.add_space(PADDING);
-            // ui.add(label);
-            ui.style_mut().visuals.hyperlink_color = CYAN;
-            ui.add_space(PADDING);
-            ui.with_layout(Layout::left_to_right(), |ui| {
-                ui.add(Hyperlink::new(&a.url).text("click me daddy ⤴"));
-            });
-            ui.add_space(PADDING);
-            ui.add(Separator::default());
-        }
-    }
+#[derive(Deserialize, Debug)]
+struct ResourceId {
+    videoId: String,
 }
 
-impl App for MatlabScript {
-    fn setup(
-        &mut self,
-        ctx: &eframe::egui::CtxRef,
-        _frame: &mut eframe::epi::Frame<'_>,
-        _storage: Option<&dyn eframe::epi::Storage>,
-    ) {
-        self.configure_fonts(ctx)
-    }
+#[derive(Deserialize, Debug)]
+struct PlaylistResponse {
+    items: Vec<PlaylistItem>,
+    nextPageToken: Option<String>,
+}
 
-    fn update(&mut self, ctx: &eframe::egui::CtxRef, frame: &mut eframe::epi::Frame) {
-        CentralPanel::default().show(ctx, |ui| {
-            ScrollArea::auto_sized().show(ui, |ui| {
-                self.render_choons(ui);
+async fn get_playlist_items(playlist_id: &str, api_key: &str) -> Vec<(String, String)> {
+    let client = Client::new();
+    let mut playlist_items = vec![];
+    let mut next_page_token = None;
+
+    loop {
+        let response = client
+            .get(&format!(
+                "https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&maxResults=999&playlistId={}&key={}{}",
+                playlist_id,
+                api_key,
+                next_page_token
+                    .as_ref()
+                    .map(|token| format!("&pageToken={}", token))
+                    .unwrap_or_else(|| "".to_owned())
+            ))
+            .send()
+            .await
+            .unwrap();
+
+        let playlist_items_response: PlaylistResponse = response.json().await.unwrap();
+        let items = playlist_items_response
+            .items
+            .into_iter()
+            .filter(|item| {
+                item.snippet.title != ""
+                    && !item
+                        .snippet
+                        .title
+                        .trim()
+                        .eq_ignore_ascii_case("Deleted video")
             })
-        });
+            .map(|item| {
+                (
+                    item.snippet.title,
+                    format!(
+                        "https://www.youtube.com/watch?v={}",
+                        item.snippet.resourceId.videoId
+                    ),
+                )
+            })
+            .collect::<Vec<(String, String)>>();
+        playlist_items.extend(items);
+
+        match playlist_items_response.nextPageToken {
+            Some(token) => next_page_token = Some(token),
+            None => break,
+        }
     }
 
-    fn name(&self) -> &str {
-        "This is Definitely a MATLAB Script"
-    }
+    playlist_items
 }
 
 fn main() {
-    let app = MatlabScript::new();
+    let playlist_id = "PLbo9hNXX38Ytwm5oe6S9S8SBrDTNwvoHF";
+    let api_key = "AIzaSyCQ-rbP3bqFkJMk8eO5xZpX3y33u3OoBxo";
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let mut titles: Vec<String> = vec![];
+    let mut urls: Vec<String> = vec![];
+
+    let playlist_items = rt.block_on(get_playlist_items(playlist_id, api_key));
+
+    for item in playlist_items {
+        titles.push(item.0.clone());
+        urls.push(item.1.clone());
+    }
+
+    let app = MatlabScript::new(titles, urls);
     let mut win_option = NativeOptions::default();
-    win_option.initial_window_size = Some(Vec2::new(540., 960.));
+    win_option.initial_window_size = Some(Vec2::new(780., 960.));
     run_native(Box::new(app), win_option);
 }
